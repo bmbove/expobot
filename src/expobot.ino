@@ -2,7 +2,8 @@
 // avrdude -v -v -v -patmega328p -cstk500v1 -P/dev/ttyACM0 -b19200 -Uflash:w:./firmware.hex:i
 #include <RF24.h>
 #include <SPI.h>
-#include <stdint.h>
+#include <PID_v1.h>
+
 
 #define PI 3.14159265359
 #define RAD_TO_DEG 57.2957795
@@ -48,7 +49,8 @@ float acc_conv = (.800/AREF) * 1024;
 // loop timing
 unsigned long last_useful_time = STD_LOOP_TIME;
 unsigned long loop_start_time;
-unsigned long timer;
+unsigned long RF_timer;
+unsigned long pitch_timer;
 int s_count;
 
 
@@ -58,10 +60,28 @@ float zeroValues[4] = { 0.0 };
 // current pitch
 float pitch;
 
+// Motor setup
+float m_speed = 0;
+float m_dir = 0;
+
+// PID vars
+float set_point = 93.7;
+float Kp = 25;
+float Ki = 5;
+float Kd = 0;
+
+PID a_pid(&pitch, &m_speed, &set_point, Kp, Ki, Kd, DIRECT);
+
+
 
 void setup(){
     // use AREF voltage for ADC
     analogReference(EXTERNAL);
+    
+    // init PID
+    a_pid.SetMode(AUTOMATIC);
+    a_pid.SetOutputLimits(-255, 255);
+    a_pid.SetSampleTime(10);
 
     // set sensor pins to input
     pinMode(AccX, INPUT);
@@ -96,14 +116,14 @@ void setup(){
     radio.openWritingPipe(pipes[0]); 
     radio.openReadingPipe(1,pipes[1]); 
     // let's give it a sec to settle down
-    delay(500);
     // ignore listening mode by commenting (send only)
     radio.startListening();
+    delay(500);
 
     calibrateSensors();
 
-    loop_start_time = micros();
-    timer = loop_start_time;
+    pitch_timer = micros(); 
+    RF_timer= micros(); 
     s_count = 0;
 
 }
@@ -113,26 +133,88 @@ void loop(){
     float x_angle = get_acc_angle();
     float gyro_rate = get_gyro();
 
-    float gyro_angle = ((micros()-timer)/1000000.0) * gyro_rate;
-    timer = micros();
+    float gyro_angle = ((micros()-pitch_timer)/1000000.0) * gyro_rate;
+    pitch_timer = micros();
     gyro_angle += pitch;
 
     // complementary filter
     pitch = (.95 * gyro_angle) + (.05 * x_angle);
 
-    send_buffer[0] = pitch;
-    send_buffer[1] = x_angle;
-    send_buffer[2] = gyro_rate;
-    nRF_send();
 
-    // get to a fixed loop time of 10ms
-    last_useful_time = micros() - loop_start_time;
-    while( (micros() - loop_start_time) < STD_LOOP_TIME){
-        true; // dat
+    if (pitch > 70 && pitch < 115){
+        a_pid.Compute();
+    }
+    else{
+        m_speed=0;
+    }
+    set_speed(m_speed);
+
+
+
+    if (((micros() - RF_timer)/1000000.0) > .25){
+        send_buffer[0] = x_angle;
+        send_buffer[1] = pitch;
+        send_buffer[2] = m_speed;
+        // receive before sending
+        // doesn't work the other way around
+        nRF_rec();
+        nRF_send();
+        a_pid.SetTunings(Kp, Ki, Kd);
+        RF_timer = micros();
     }
 
-    loop_start_time = micros();
+    // get to a fixed loop time of 10ms
+    //last_useful_time = micros() - loop_start_time;
+    //while( (micros() - loop_start_time) < STD_LOOP_TIME){
+        //true; // dat
+    //}
+
+    //loop_start_time = micros();
 }
+
+void set_speed(float speed){
+
+    speed = constrain(speed, -255, 255);
+    int w_speed = abs(floor(speed));
+    if (w_speed < 20){
+        w_speed = 0;
+    }
+    m_speed = speed;
+
+
+    //analogWrite(A_PWM, 0);
+    //analogWrite(B_PWM, 0);
+
+    if (speed < 0){
+        digitalWrite(A_1, LOW);
+        digitalWrite(A_2, HIGH);
+
+        digitalWrite(B_1, LOW);
+        digitalWrite(B_2, HIGH);
+    }
+    else if (speed > 0 ){
+        digitalWrite(A_2, LOW);
+        digitalWrite(A_1, HIGH);
+
+        digitalWrite(B_2, LOW);
+        digitalWrite(B_1, HIGH);
+    }
+    else{
+        digitalWrite(A_2, LOW);
+        digitalWrite(A_1, LOW);
+
+        digitalWrite(B_2, LOW);
+        digitalWrite(B_1, LOW);
+
+        analogWrite(A_PWM, 0);
+        analogWrite(B_PWM, 0);
+    }
+
+    analogWrite(A_PWM, w_speed);
+    analogWrite(B_PWM, w_speed);
+    
+}
+
 
 void calibrateSensors(){
     // take average of 100 readings
@@ -212,7 +294,7 @@ void nRF_send(){
     strcat(outBuffer,",");
 
     for (int i=0; i < 3; i++){
-        send_buffer[i] = 0;
+        //send_buffer[i] = 0;
     }
     
     // Stop listening and write to radio 
@@ -224,6 +306,61 @@ void nRF_send(){
     radio.startListening();
 
 }
+
+void nRF_rec(){
+   
+    char receivePayload[31];
+    uint8_t len = 0;
+    uint8_t pipe = 0;
+    char* reply;
+        
+        
+    // Loop thru the pipes 0 to 5 and check for payloads    
+    if ( radio.available( &pipe ) ) {
+      bool done = false;
+      while (!done)
+      {
+        len = radio.getDynamicPayloadSize();  
+        done = radio.read( &receivePayload,len );
+        
+        // Sending back reply to sender using the same pipe
+        radio.stopListening();
+        //radio.openWritingPipe(pipes[pipe]);
+        radio.write(receivePayload,len);
+        radio.startListening();
+        float recv = atof(receivePayload);
+        if (recv < 100){
+            Kp = recv;
+        }
+        if (recv >= 100 && recv < 200){
+            Ki = recv - 100;
+        }
+        if (recv >= 200 && recv < 300){
+            Kd = recv - 200;
+        }
+        if (recv >= 300 && recv < 400){
+            set_point = recv - 300;
+        }
+
+
+        if (recv == 999){
+            calibrateSensors();
+            send_buffer[0] = 999;
+            send_buffer[1] = 999;
+            send_buffer[2] = 999;
+        }
+        // Format string for printing ending with 0
+        /*receivePayload[len] = 0;*/
+        
+        // Increase pipe and reset to 0 if more than 5
+        pipe++;
+        if ( pipe > 1 ) pipe = 0;
+      }
+
+    }
+
+}
+
 
 int freeRam () {
     extern int __heap_start, *__brkval; 
