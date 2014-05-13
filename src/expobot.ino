@@ -1,5 +1,8 @@
+// for flashing:
+// avrdude -v -v -v -patmega328p -cstk500v1 -P/dev/ttyACM0 -b19200 -Uflash:w:./firmware.hex:i
 #include <RF24.h>
-#include <Kalman.h>
+#include <SPI.h>
+#include <stdint.h>
 
 #define PI 3.14159265359
 #define RAD_TO_DEG 57.2957795
@@ -15,23 +18,19 @@
 
 // Motor Controller
 #define A_PWM 6
-#define A1 7
-#define A2 8
+#define A_1 7
+#define A_2 8
 #define B_PWM 5
-#define B1 4
-#define B2 3
+#define B_1 4
+#define B_2 3
 
 // RF init
 #define RF_SETUP 0x17
 RF24 radio(CE, CSN);
 // buffer for sending
-float send_buffer[3] = { 0 };
+float send_buffer[3] = { 0.0 };
 // pipes for sending and receiving
 const uint64_t pipes[2] = { 0xF0F0F0F0E1LL, 0x7365727631LL };
-
-// init kalman filter
-Kalman kalman;
-
 
 // sensor inputs
 int AccX = A0;
@@ -54,11 +53,10 @@ int s_count;
 
 
 // sensor calibration
-float zeroValues[4] = { 0 };
+float zeroValues[4] = { 0.0 };
 
 // current pitch
 float pitch;
-
 
 
 void setup(){
@@ -75,12 +73,12 @@ void setup(){
     pinMode(CE, OUTPUT);
 
     pinMode(A_PWM, OUTPUT);
-    pinMode(A1, OUTPUT);
-    pinMode(A2, OUTPUT);
+    pinMode(A_1, OUTPUT);
+    pinMode(A_2, OUTPUT);
 
     pinMode(B_PWM, OUTPUT);
-    pinMode(B1, OUTPUT);
-    pinMode(B2, OUTPUT);
+    pinMode(B_1, OUTPUT);
+    pinMode(B_2, OUTPUT);
 
     // RF setup
     radio.begin();
@@ -98,8 +96,7 @@ void setup(){
     radio.openWritingPipe(pipes[0]); 
     radio.openReadingPipe(1,pipes[1]); 
     // let's give it a sec to settle down
-    delay(1000);
-
+    delay(500);
     // ignore listening mode by commenting (send only)
     radio.startListening();
 
@@ -116,13 +113,19 @@ void loop(){
     float x_angle = get_acc_angle();
     float gyro_rate = get_gyro();
 
-    pitch = kalman.getAngle(x_angle, gyro_rate, (micros()-timer)/100000.0);
+    float gyro_angle = ((micros()-timer)/1000000.0) * gyro_rate;
     timer = micros();
+    gyro_angle += pitch;
+
+    // complementary filter
+    pitch = (.95 * gyro_angle) + (.05 * x_angle);
 
     send_buffer[0] = pitch;
     send_buffer[1] = x_angle;
     send_buffer[2] = gyro_rate;
+    nRF_send();
 
+    // get to a fixed loop time of 10ms
     last_useful_time = micros() - loop_start_time;
     while( (micros() - loop_start_time) < STD_LOOP_TIME){
         true; // dat
@@ -146,17 +149,15 @@ void calibrateSensors(){
     zeroValues[2] /= 100; // Accelerometer Y-axis
     zeroValues[3] /= 100; // Accelerometer Z-axis  
 
-    if (zeroValues[3] > 650){ 
+    if (zeroValues[3] > 450){ 
         // +1g when lying on one side
         zeroValues[3] -= acc_conv; 
         pitch = 0;
-        kalman.setAngle(0);
     } 
     else {
         // -1g when lying on the other side
         zeroValues[3] += acc_conv; 
         pitch = 180;
-        kalman.setAngle(180);
     }
 }
 
@@ -188,8 +189,7 @@ float get_gyro() {
     return -gyro_rate;
 }
 
-void nRF_send()
-{
+void nRF_send(){
     // need to turn into some kind of queue
     // so that stuff can be added without taking
     // extra time and then sent all at once in
@@ -199,7 +199,7 @@ void nRF_send()
 
     // Clear the outBuffer before every loop
     char outBuffer[32]="";
-    unsigned long send_time, rtt = 0;
+
         
     dtostrf(send_buffer[0], 8, 2, temp);
     strcat(outBuffer,temp);
@@ -215,16 +215,18 @@ void nRF_send()
         send_buffer[i] = 0;
     }
     
-    send_time = millis();
-    
     // Stop listening and write to radio 
     radio.stopListening();
     
-    // Send to hub
+    //// Send to hub
     radio.write( outBuffer, strlen(outBuffer));
 
     radio.startListening();
-    /*delay(100);  */
 
 }
 
+int freeRam () {
+    extern int __heap_start, *__brkval; 
+    int v; 
+    return (int) &v - (__brkval == 0 ? (int) &__heap_start : (int) __brkval); 
+}
