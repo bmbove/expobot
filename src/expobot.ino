@@ -119,6 +119,10 @@ void loop(){
     pitch = kalman.getAngle(x_angle, gyro_rate, (micros()-timer)/100000.0);
     timer = micros();
 
+    send_buffer[0] = pitch;
+    send_buffer[1] = x_angle;
+    send_buffer[2] = gyro_rate;
+
     last_useful_time = micros() - loop_start_time;
     while( (micros() - loop_start_time) < STD_LOOP_TIME){
         true; // dat
@@ -182,5 +186,45 @@ float get_gyro() {
 
     // negative to make up for orientation
     return -gyro_rate;
+}
+
+void nRF_send()
+{
+    // need to turn into some kind of queue
+    // so that stuff can be added without taking
+    // extra time and then sent all at once in
+    // bursts
+
+    char temp[8];
+
+    // Clear the outBuffer before every loop
+    char outBuffer[32]="";
+    unsigned long send_time, rtt = 0;
+        
+    dtostrf(send_buffer[0], 8, 2, temp);
+    strcat(outBuffer,temp);
+    strcat(outBuffer,",");
+    dtostrf(send_buffer[1], 8, 2, temp);
+    strcat(outBuffer,temp);
+    strcat(outBuffer,",");
+    dtostrf(send_buffer[2], 8, 2, temp);
+    strcat(outBuffer,temp);
+    strcat(outBuffer,",");
+
+    for (int i=0; i < 3; i++){
+        send_buffer[i] = 0;
+    }
+    
+    send_time = millis();
+    
+    // Stop listening and write to radio 
+    radio.stopListening();
+    
+    // Send to hub
+    radio.write( outBuffer, strlen(outBuffer));
+
+    radio.startListening();
+    /*delay(100);  */
+
 }
 
