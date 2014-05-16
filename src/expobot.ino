@@ -3,6 +3,8 @@
 #include <RF24.h>
 #include <SPI.h>
 #include <PID_v1.h>
+#include <digitalWriteFast.h>
+
 
 
 #define PI 3.14159265359
@@ -44,6 +46,7 @@ int GyroX = A3;
 // acc: 800mv per g
 float gyro_conv = (.002/AREF) * 1024;
 float acc_conv = (.800/AREF) * 1024;
+float gyro_scale = 12;
 
 
 // loop timing
@@ -61,27 +64,32 @@ float zeroValues[4] = { 0.0 };
 float pitch;
 
 // Motor setup
-float m_speed = 0;
+float m_speed[2] = { 0 };
+float pid_speed = 0;
 float m_dir = 0;
 
 // PID vars
-float set_point = 93.7;
-float Kp = 25;
-float Ki = 5;
-float Kd = 0;
+float set_point = 93.5;
+float Kp = 50;
+float Ki = 20;
+float Kd = .3;
 
-PID a_pid(&pitch, &m_speed, &set_point, Kp, Ki, Kd, DIRECT);
-
+PID a_pid(&pitch, &pid_speed, &set_point, Kp, Ki, Kd, DIRECT);
 
 
 void setup(){
+
+    // set pwm on 5 and 6 to 31khz 
+    //TCCR0A = _BV(COM0A1) | _BV(COM0B1) | _BV(WGM00); 
+    //TCCR0B = _BV(CS00); 
+
     // use AREF voltage for ADC
     analogReference(EXTERNAL);
     
     // init PID
     a_pid.SetMode(AUTOMATIC);
     a_pid.SetOutputLimits(-255, 255);
-    a_pid.SetSampleTime(10);
+    a_pid.SetSampleTime(11);
 
     // set sensor pins to input
     pinMode(AccX, INPUT);
@@ -122,8 +130,9 @@ void setup(){
 
     calibrateSensors();
 
-    pitch_timer = micros(); 
-    RF_timer= micros(); 
+    loop_start_time = micros();
+    pitch_timer = loop_start_time; 
+    RF_timer = loop_start_time; 
     s_count = 0;
 
 }
@@ -132,86 +141,110 @@ void loop(){
 
     float x_angle = get_acc_angle();
     float gyro_rate = get_gyro();
-
-    float gyro_angle = ((micros()-pitch_timer)/1000000.0) * gyro_rate;
+    
+    float gyro_change = ((micros()-pitch_timer)/1000000.0) * gyro_rate;
     pitch_timer = micros();
-    gyro_angle += pitch;
 
     // complementary filter
-    pitch = (.95 * gyro_angle) + (.05 * x_angle);
+    pitch += gyro_change;
+    pitch = (.98 * pitch) + (.02 * x_angle);
 
-
-    if (pitch > 70 && pitch < 115){
-        a_pid.Compute();
+    if (abs(set_point-pitch) < .5){
+       a_pid.SetTunings(Kp, Ki*0.0, Kd*0.0); 
     }
     else{
-        m_speed=0;
-    }
-    set_speed(m_speed);
-
-
-
-    if (((micros() - RF_timer)/1000000.0) > .25){
-        send_buffer[0] = x_angle;
-        send_buffer[1] = pitch;
-        send_buffer[2] = m_speed;
-        // receive before sending
-        // doesn't work the other way around
-        nRF_rec();
-        nRF_send();
         a_pid.SetTunings(Kp, Ki, Kd);
-        RF_timer = micros();
     }
+
+
+    if (pitch > (set_point - 25) && pitch < (set_point + 25)){
+        a_pid.Compute();
+        m_speed[0] = pid_speed;
+        m_speed[1] = pid_speed;
+    }
+    else{
+        pid_speed = 0;
+        if (((micros() - RF_timer)/1000000.0) > .15){
+            // receive before sending
+            // doesn't work the other way around
+            nRF_motor();
+            //nRF_rec();
+            //send_buffer[0] = set_point-pitch;
+            //send_buffer[1] = pitch;
+            //send_buffer[2] = pid_speed;
+            //nRF_send();
+            RF_timer = micros();
+        }
+    }
+
+    set_speed();
+
+
+
 
     // get to a fixed loop time of 10ms
-    //last_useful_time = micros() - loop_start_time;
-    //while( (micros() - loop_start_time) < STD_LOOP_TIME){
-        //true; // dat
-    //}
+    last_useful_time = micros() - loop_start_time;
+    while( (micros() - loop_start_time) < STD_LOOP_TIME){
+        true; // dat
+    }
 
-    //loop_start_time = micros();
+    loop_start_time = micros();
 }
 
-void set_speed(float speed){
+void set_speed(){
 
-    speed = constrain(speed, -255, 255);
-    int w_speed = abs(floor(speed));
-    if (w_speed < 20){
-        w_speed = 0;
+    signed int lm_speed = constrain(m_speed[0], -255, 255);
+    signed int rm_speed = constrain(m_speed[1], -255, 255);
+
+    if (lm_speed > 0 && lm_speed < 30){
+        lm_speed = 30;
     }
-    m_speed = speed;
-
-
-    //analogWrite(A_PWM, 0);
-    //analogWrite(B_PWM, 0);
-
-    if (speed < 0){
-        digitalWrite(A_1, LOW);
-        digitalWrite(A_2, HIGH);
-
-        digitalWrite(B_1, LOW);
-        digitalWrite(B_2, HIGH);
+    if (lm_speed < 0 && lm_speed > -30){
+        lm_speed = -30;
     }
-    else if (speed > 0 ){
-        digitalWrite(A_2, LOW);
-        digitalWrite(A_1, HIGH);
 
-        digitalWrite(B_2, LOW);
-        digitalWrite(B_1, HIGH);
+    if (rm_speed > 0 && rm_speed < 30){
+        rm_speed = 30;
+    }
+    if (rm_speed < 0 && rm_speed > -30){
+        rm_speed = -30;
+    }
+
+
+    // set left motor dir
+    if (lm_speed < 0){
+        digitalWriteFast(A_1, LOW);
+        digitalWriteFast(A_2, HIGH);
+    }
+    else if (lm_speed > 1 ){
+        digitalWriteFast(A_2, LOW);
+        digitalWriteFast(A_1, HIGH);
     }
     else{
-        digitalWrite(A_2, LOW);
-        digitalWrite(A_1, LOW);
-
-        digitalWrite(B_2, LOW);
-        digitalWrite(B_1, LOW);
-
-        analogWrite(A_PWM, 0);
-        analogWrite(B_PWM, 0);
+        digitalWriteFast(A_2, LOW);
+        digitalWriteFast(A_1, LOW);
     }
 
-    analogWrite(A_PWM, w_speed);
-    analogWrite(B_PWM, w_speed);
+    // set right motor dir
+    if (rm_speed < 0){
+        digitalWriteFast(B_1, LOW);
+        digitalWriteFast(B_2, HIGH);
+    }
+    else if (rm_speed > 1 ){
+        digitalWriteFast(B_2, LOW);
+        digitalWriteFast(B_1, HIGH);
+    }
+    else{
+        digitalWriteFast(B_2, LOW);
+        digitalWriteFast(B_1, LOW);
+    }
+
+    // set motor speeds
+    analogWrite(A_PWM, abs(lm_speed));
+    analogWrite(B_PWM, abs(rm_speed));
+
+    m_speed[0] = lm_speed;
+    m_speed[1] = rm_speed;
     
 }
 
@@ -265,7 +298,7 @@ float get_gyro() {
 
     float gyro_read = (float)analogRead(GyroX);
     float gyro_rate = gyro_read - zeroValues[0]; 
-    gyro_rate = gyro_rate * gyro_conv; 
+    gyro_rate = gyro_rate * gyro_conv * gyro_scale; 
 
     // negative to make up for orientation
     return -gyro_rate;
@@ -307,6 +340,84 @@ void nRF_send(){
 
 }
 
+// receives speed/dir data from controller
+void nRF_motor(){
+   
+    char receivePayload[31];
+    uint8_t len = 0;
+    uint8_t pipe = 0;
+    char* reply;
+    int m_state = 0;
+        
+        
+    // Loop thru the pipes 0 to 5 and check for payloads    
+    if ( radio.available( &pipe ) ) {
+      bool done = false;
+      while (!done)
+      {
+        len = radio.getDynamicPayloadSize();  
+        done = radio.read( &receivePayload,len );
+        float recv = atof(receivePayload);
+
+        if (recv > 999){
+            m_state = floor(recv - 1000);
+        }
+
+        switch (m_state) {
+            case 0:
+                m_speed[0] = 0;
+                m_speed[1] = 0;
+                break;
+            case 1:
+                m_speed[0] = 255;
+                m_speed[1] = 255;
+                break;
+            case 2:
+                m_speed[0] = -255;
+                m_speed[1] = -255;
+                break;
+            case 3:
+                m_speed[0] = 255;
+                m_speed[1] = 0;
+                break;
+            case 4:
+                m_speed[0] = -255;
+                m_speed[1] = 0;
+                break;
+            case 5:
+                m_speed[0] = 0;
+                m_speed[1] = 255;
+                break;
+            case 6:
+                m_speed[0] = 0;
+                m_speed[1] = -255;
+                break;
+            case 7:
+                m_speed[0] = -255;
+                m_speed[1] = 255;
+                break;
+            case 8:
+                m_speed[0] = 255;
+                m_speed[1] = -255;
+                break;
+            default:
+                m_speed[0] = 0;
+                m_speed[1] = 0;
+        }
+
+        // Increase pipe and reset to 0 if more than 5
+        pipe++;
+        if ( pipe > 1 ) pipe = 0;
+      }
+
+    }
+    else{
+        m_speed[0] = 0;
+        m_speed[1] = 0;
+    }
+
+}
+
 void nRF_rec(){
    
     char receivePayload[31];
@@ -338,9 +449,15 @@ void nRF_rec(){
         if (recv >= 200 && recv < 300){
             Kd = recv - 200;
         }
-        if (recv >= 300 && recv < 400){
+        if (recv >= 300 && recv < 500){
             set_point = recv - 300;
         }
+        if (recv >= 500 && recv < 600){
+            gyro_scale = recv - 500;
+        }
+        //if (recv >= 600 && recv < 700){
+            //m_speed = recv - 600;
+        //}
 
 
         if (recv == 999){
