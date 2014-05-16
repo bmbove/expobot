@@ -23,6 +23,6 @@ Note that this code is incomplete and quite messy. I haven't had the chance to c
 since my initial development and testing.
 
 Libraries used:
-*[digitalWriteFast](https://code.google.com/p/digitalwritefast/)
-*[Arduino PID Library](https://github.com/br3ttb/Arduino-PID-Library/)
-*[RF24 Library](https://github.com/stanleyseow)
+* [digitalWriteFast](https://code.google.com/p/digitalwritefast/)
+* [Arduino PID Library](https://github.com/br3ttb/Arduino-PID-Library/)
+* [RF24 Library](https://github.com/stanleyseow)
